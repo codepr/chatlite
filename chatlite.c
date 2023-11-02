@@ -161,6 +161,23 @@ exit:
     return -1;
 }
 
+/**
+ * Simple broadcast function, for now we just assume all non connected FDs
+ * are set to 0 as per initialization of the server struct in the main
+ * function.
+ */
+void broadcast_message(Server *server, const char *buf) {
+    int nwrite = 0;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (server->clients[i] == 0)
+            continue;
+        printf("Broadcasting to %i\n", server->clients[i]);
+        nwrite = write(server->clients[i], buf, strlen(buf));
+        if (nwrite < 0)
+            perror("write(3)");
+    }
+}
+
 int main(void) {
 
     printf("Server init\n\n");
@@ -204,6 +221,7 @@ int main(void) {
                     return -1;
                 }
                 set_nonblocking(client_fd);
+                server.clients[client_fd] = client_fd;
                 ev.events = EPOLLIN | EPOLLET;
                 ev.data.fd = client_fd;
                 if (epoll_ctl(epollfd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
@@ -213,8 +231,13 @@ int main(void) {
             } else {
                 char buf[256] = {0};
                 int nread = read(events[i].data.fd, buf, sizeof(buf) - 1);
-                printf("Read %i bytes\n", nread);
-                printf("%s\n", buf);
+                if (nread < 0) {
+                    printf("Client disconnected fd=%i\n", events[i].data.fd);
+                } else {
+                    buf[nread] = 0;
+                    printf("(%i bytes) %s", nread, buf);
+                    broadcast_message(&server, buf);
+                }
             }
         }
     }
