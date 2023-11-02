@@ -26,6 +26,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
@@ -36,6 +37,7 @@
 #define BACKLOG 128
 #define MAX_EVENTS 64
 #define MAX_CLIENTS 1024
+#define NICK_MAX_LENGTH 32
 
 /*
  * Let's use a global event based IO syscall
@@ -44,14 +46,36 @@ struct epoll_event ev;
 struct epoll_event events[MAX_EVENTS];
 
 /*
+ * Simple client state, currently contains only the file descriptor and
+ * the nickname set in the chat
+ */
+typedef struct {
+    int fd;
+    char nick[NICK_MAX_LENGTH];
+} Client;
+
+/*
  * A basic server state
  *  - fd the file descriptor it listens on
  *  - clients an array of file descriptors representing client connections
  */
 typedef struct {
     int fd;
-    int clients[MAX_CLIENTS];
+    Client *clients[MAX_CLIENTS];
 } Server;
+
+/*
+ * Basic utility functions, e.g. memory management, allocator functions
+ */
+
+void *cl_malloc(size_t size) {
+    void *ptr = malloc(size);
+    if (ptr == NULL) {
+        perror("Out of memory");
+        exit(EXIT_FAILURE);
+    }
+    return ptr;
+}
 
 /*
  * =====================================================
@@ -169,10 +193,13 @@ exit:
 void broadcast_message(Server *server, const char *buf) {
     int nwrite = 0;
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (server->clients[i] == 0)
+        Client *c = server->clients[i];
+        if (c == NULL)
             continue;
-        printf("Broadcasting to %i\n", server->clients[i]);
-        nwrite = write(server->clients[i], buf, strlen(buf));
+        printf("Broadcasting to %s\n", c->nick);
+        char msg[256];
+        int msglen = snprintf(msg, sizeof(msg), "%s> %s", c->nick, buf);
+        nwrite = write(c->fd, msg, msglen);
         if (nwrite < 0)
             perror("write(3)");
     }
@@ -182,7 +209,7 @@ int main(void) {
 
     printf("Server init\n\n");
 
-    Server server = {.fd = 0, .clients = {0}};
+    Server server = {.fd = 0, .clients = {NULL}};
 
     // Make the server listen unblocking
     if (cl_listen(&server, ADDR, PORT, BACKLOG) == -1) {
@@ -221,7 +248,13 @@ int main(void) {
                     return -1;
                 }
                 set_nonblocking(client_fd);
-                server.clients[client_fd] = client_fd;
+
+                // Let's make a client here
+                Client *c = cl_malloc(sizeof(Client));
+                c->fd = client_fd;
+                snprintf(c->nick, sizeof(c->nick), "anon:%d", client_fd);
+                server.clients[client_fd] = c;
+
                 ev.events = EPOLLIN | EPOLLET;
                 ev.data.fd = client_fd;
                 if (epoll_ctl(epollfd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
@@ -233,6 +266,8 @@ int main(void) {
                 int nread = read(events[i].data.fd, buf, sizeof(buf) - 1);
                 if (nread < 0) {
                     printf("Client disconnected fd=%i\n", events[i].data.fd);
+                    close(events[i].data.fd);
+                    free(server.clients[events[i].data.fd]);
                 } else {
                     buf[nread] = 0;
                     printf("(%i bytes) %s", nread, buf);
