@@ -22,6 +22,7 @@
  *
  */
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -75,6 +76,27 @@ void *cl_malloc(size_t size) {
         exit(EXIT_FAILURE);
     }
     return ptr;
+}
+
+char *trim_string(char *str) {
+    char *end;
+
+    // Trim leading space
+    while (isspace((unsigned char)*str))
+        str++;
+
+    if (*str == 0) // All spaces?
+        return str;
+
+    // Trim trailing space
+    end = str + strlen(str) - 1;
+    while (end > str && isspace((unsigned char)*end))
+        end--;
+
+    // Write new null terminator character
+    end[1] = '\0';
+
+    return str;
 }
 
 /*
@@ -255,6 +277,14 @@ int main(void) {
                 snprintf(c->nick, sizeof(c->nick), "anon:%d", client_fd);
                 server.clients[client_fd] = c;
 
+                // Let's send some welcome message
+                char msg[256];
+                int msglen = snprintf(
+                    msg, sizeof(msg),
+                    "Server> Welcome %s! Use /nick to set a nickname\n\n",
+                    c->nick);
+                int nwrite = write(c->fd, msg, msglen);
+
                 ev.events = EPOLLIN | EPOLLET;
                 ev.data.fd = client_fd;
                 if (epoll_ctl(epollfd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
@@ -270,8 +300,23 @@ int main(void) {
                     free(server.clients[events[i].data.fd]);
                 } else {
                     buf[nread] = 0;
-                    printf("(%i bytes) %s", nread, buf);
-                    broadcast_message(&server, buf);
+                    if (strncmp(buf, "/quit", 5) == 0) {
+                        // Client wants to disconnect here
+                        if (epoll_ctl(epollfd, EPOLL_CTL_DEL, events[i].data.fd,
+                                      NULL) < 0)
+                            perror("disconnecting client");
+                        close(events[i].data.fd);
+                        free(server.clients[events[i].data.fd]);
+                    } else if (strncmp(buf, "/nick", 5) == 0) {
+                        Client *c = server.clients[events[i].data.fd];
+                        char raw_nick[NICK_MAX_LENGTH];
+                        strncpy(raw_nick, buf + 5, nread);
+                        char *nick = trim_string(raw_nick);
+                        strncpy(c->nick, nick, strlen(raw_nick));
+                    } else {
+                        printf("(%i bytes) %s", nread, buf);
+                        broadcast_message(&server, buf);
+                    }
                 }
             }
         }
