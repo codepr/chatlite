@@ -99,6 +99,25 @@ char *trim_string(char *str) {
     return str;
 }
 
+void generate_random_token(char token[16]) {
+    int urandom = open("/dev/urandom", O_RDONLY);
+    if (urandom < 0) {
+        perror("urandom");
+        // Panic for now
+        exit(EXIT_FAILURE);
+    }
+    char random_data[16];
+    ssize_t result = read(urandom, random_data, sizeof(random_data));
+    if (result < 0) {
+        perror("reading urandom");
+        // Panic for now`
+        exit(EXIT_FAILURE);
+    }
+    token[16] = 0;
+    for (int i = 0; i < 8; i++)
+        sprintf(&token[2 * i], "%02X", random_data[i]);
+}
+
 /*
  * =====================================================
  *                 NETWORKING HELPERS
@@ -230,6 +249,11 @@ void broadcast_message(Server *server, const char *buf) {
 int main(void) {
 
     printf("Server init\n\n");
+
+    char token[16] = {0};
+    generate_random_token(token);
+
+    printf("Token: %s\n", token);
 
     Server server = {.fd = 0, .clients = {NULL}};
 
