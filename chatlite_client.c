@@ -397,6 +397,13 @@ int main(void) {
             ssize_t count = read(STDIN_FILENO, buf, sizeof(buf));
 
             for (int j = 0; j < count; j++) {
+                // Let's disable the up arrow
+                if (buf[j] == '\x1b' && count - j >= 3) {
+                    if (buf[j + 1] == '[' && buf[j + 2] == 'A') {
+                        j += 2;
+                        continue;
+                    }
+                }
 
                 int res = input_buffer_feed_char(&ib, buf[j]);
                 switch (res) {
