@@ -26,11 +26,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define ADDR "127.0.0.1"
@@ -38,7 +40,28 @@
 #define BACKLOG 128
 #define MAX_EVENTS 64
 #define MAX_CLIENTS 1024
-#define NICK_MAX_LENGTH 32
+#define NICK_MAXLEN 32
+
+// Return codes
+#define CL_OK 0
+#define CL_ERR -1
+
+// Debug logging
+#define CL_LOG(fmt, ...)                                                       \
+    do {                                                                       \
+        char timestamp_str[64] = {0};                                          \
+        time_t t = time(NULL);                                                 \
+        struct tm *tmp = localtime(&t);                                        \
+        strftime(timestamp_str, sizeof(timestamp_str), "%T", tmp);             \
+        stderr_printf("[%s] " fmt, timestamp_str, __VA_ARGS__);                \
+    } while (0)
+
+void stderr_printf(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+}
 
 /*
  * Let's use a global event based IO syscall
@@ -52,7 +75,7 @@ struct epoll_event events[MAX_EVENTS];
  */
 typedef struct {
     int fd;
-    char nick[NICK_MAX_LENGTH];
+    char nick[NICK_MAXLEN];
 } Client;
 
 /*
@@ -113,7 +136,7 @@ void generate_random_token(char token[16]) {
         // Panic for now`
         exit(EXIT_FAILURE);
     }
-    token[16] = 0;
+    token[15] = 0;
     for (int i = 0; i < 8; i++)
         sprintf(&token[2 * i], "%02X", random_data[i]);
 }
@@ -148,12 +171,12 @@ static int set_nonblocking(int fd) {
     if (result == -1)
         goto err;
 
-    return 0;
+    return CL_OK;
 
 err:
 
     fprintf(stderr, "set_nonblocking: %s\n", strerror(errno));
-    return -1;
+    return CL_ERR;
 }
 
 static int cl_listen(Server *server, const char *host, int port, int backlog) {
@@ -203,9 +226,9 @@ static int cl_listen(Server *server, const char *host, int port, int backlog) {
 
     server->fd = listen_fd;
 
-    return 0;
+    return CL_OK;
 err:
-    return -1;
+    return CL_ERR;
 }
 
 static int cl_accept(Server *server) {
@@ -223,7 +246,7 @@ static int cl_accept(Server *server) {
 exit:
     if (errno != EWOULDBLOCK && errno != EAGAIN)
         perror("accept");
-    return -1;
+    return CL_ERR;
 }
 
 /**
@@ -231,15 +254,21 @@ exit:
  * are set to 0 as per initialization of the server struct in the main
  * function.
  */
-void broadcast_message(Server *server, const char *buf) {
+void broadcast_message(Server *server, const char *buf, int fd,
+                       int server_info) {
     int nwrite = 0;
+    Client *sender = server->clients[fd];
     for (int i = 0; i < MAX_CLIENTS; i++) {
         Client *c = server->clients[i];
-        if (c == NULL)
+        if (c == NULL || i == fd)
             continue;
-        printf("Broadcasting to %s\n", c->nick);
+        CL_LOG("Broadcasting to %s\n", c->nick);
         char msg[256];
-        int msglen = snprintf(msg, sizeof(msg), "%s> %s", c->nick, buf);
+        int msglen = 0;
+        if (!server_info)
+            msglen = snprintf(msg, sizeof(msg), "%s\r\n%s", sender->nick, buf);
+        else
+            msglen = snprintf(msg, sizeof(msg), "Server\r\n%s", buf);
         nwrite = write(c->fd, msg, msglen);
         if (nwrite < 0)
             perror("write(3)");
@@ -248,26 +277,27 @@ void broadcast_message(Server *server, const char *buf) {
 
 int main(void) {
 
-    printf("Server init\n\n");
+    CL_LOG("Server init on %s:%d\n\n", ADDR, PORT);
 
     char token[16] = {0};
+    char buf[256] = {0};
     generate_random_token(token);
 
-    printf("Token: %s\n", token);
+    CL_LOG("Token: %s\n", token);
 
     Server server = {.fd = 0, .clients = {NULL}};
 
     // Make the server listen unblocking
     if (cl_listen(&server, ADDR, PORT, BACKLOG) == -1) {
         fprintf(stderr, "Error listening on %s:%i\n", ADDR, PORT);
-        return -1;
+        return CL_ERR;
     }
 
     int nfds = 0;
     int epollfd = epoll_create1(0);
     if (epollfd == -1) {
         perror("epoll_create1");
-        return -1;
+        return CL_ERR;
     }
 
     // Register the server listening socket into the epoll loop
@@ -275,7 +305,7 @@ int main(void) {
     ev.data.fd = server.fd;
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, server.fd, &ev) == -1) {
         perror("epoll_ctl: server fd");
-        return -1;
+        return CL_ERR;
     }
 
     // Start the event loop
@@ -283,7 +313,7 @@ int main(void) {
         nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
         if (nfds == -1) {
             perror("epoll_wait");
-            return -1;
+            return CL_ERR;
         }
 
         for (int i = 0; i < nfds; ++i) {
@@ -291,9 +321,9 @@ int main(void) {
                 int client_fd = cl_accept(&server);
                 if (client_fd == -1) {
                     perror("accept");
-                    return -1;
+                    return CL_ERR;
                 }
-                set_nonblocking(client_fd);
+                (void)set_nonblocking(client_fd);
 
                 // Let's make a client here
                 Client *c = cl_malloc(sizeof(Client));
@@ -301,25 +331,33 @@ int main(void) {
                 snprintf(c->nick, sizeof(c->nick), "anon:%d", client_fd);
                 server.clients[client_fd] = c;
 
-                // Let's send some welcome message
-                char msg[256];
-                int msglen = snprintf(
-                    msg, sizeof(msg),
-                    "Server> Welcome %s! Use /nick to set a nickname\n\n",
+                CL_LOG("New user %s connected\n", c->nick);
+
+                // Let's send a welcome message
+                int buflen = snprintf(
+                    buf, sizeof(buf),
+                    "Server\r\nWelcome %s! Use /nick to set a nickname\n\n",
                     c->nick);
-                int nwrite = write(c->fd, msg, msglen);
+                int nwrite = write(c->fd, buf, buflen);
+                if (nwrite < 0)
+                    perror("write welcome message");
+
+                // Let's broadcast the new joiner
+                memset(buf, 0x00, sizeof(buf));
+                size_t maxlen = strlen(c->nick) + 9;
+                snprintf(buf, maxlen, "%s joined\n", c->nick);
+                broadcast_message(&server, buf, client_fd, 1);
 
                 ev.events = EPOLLIN | EPOLLET;
                 ev.data.fd = client_fd;
                 if (epoll_ctl(epollfd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
                     perror("epoll_ctl: client fd");
-                    return -1;
+                    return CL_ERR;
                 }
             } else {
-                char buf[256] = {0};
-                int nread = read(events[i].data.fd, buf, sizeof(buf) - 1);
+                ssize_t nread = read(events[i].data.fd, buf, sizeof(buf) - 1);
                 if (nread < 0) {
-                    printf("Client disconnected fd=%i\n", events[i].data.fd);
+                    CL_LOG("Client disconnected fd=%i\n", events[i].data.fd);
                     close(events[i].data.fd);
                     free(server.clients[events[i].data.fd]);
                 } else {
@@ -329,17 +367,28 @@ int main(void) {
                         if (epoll_ctl(epollfd, EPOLL_CTL_DEL, events[i].data.fd,
                                       NULL) < 0)
                             perror("disconnecting client");
+                        Client *c = server.clients[events[i].data.fd];
+                        CL_LOG("User %s disconnected\n", c->nick);
+                        // Let's broadcast the user leaving
+                        memset(buf, 0x00, sizeof(buf));
+                        size_t maxlen = strlen(c->nick) + 7;
+                        snprintf(buf, maxlen, "%s left\n", c->nick);
+                        broadcast_message(&server, buf, c->fd, 1);
                         close(events[i].data.fd);
                         free(server.clients[events[i].data.fd]);
+                        server.clients[events[i].data.fd] = NULL;
                     } else if (strncmp(buf, "/nick", 5) == 0) {
                         Client *c = server.clients[events[i].data.fd];
-                        char raw_nick[NICK_MAX_LENGTH];
+                        char raw_nick[NICK_MAXLEN];
                         strncpy(raw_nick, buf + 5, nread);
                         char *nick = trim_string(raw_nick);
+                        CL_LOG("User %s updating nick to %s\n", c->nick, nick);
                         strncpy(c->nick, nick, strlen(raw_nick));
                     } else {
-                        printf("(%i bytes) %s", nread, buf);
-                        broadcast_message(&server, buf);
+                        Client *c = server.clients[events[i].data.fd];
+                        CL_LOG("User: %s len: %li msg: %s", c->nick, nread,
+                               buf);
+                        broadcast_message(&server, buf, events[i].data.fd, 0);
                     }
                 }
             }
