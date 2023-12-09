@@ -89,29 +89,32 @@ err:
  * a degree of control on the input and output behaviour of the
  * client interface.
  */
-void tty_disable_rawmode_atexit(void);
 
-int tty_raw_mode(int fd, bool enable) {
-    // We have a bit of global state (but local in scope) here.
-    // This is needed to correctly set/undo raw mode.
-    static struct termios orig_termios; // Save original terminal status here.
+// Save original terminal status here.
+static struct termios orig_termios;
+
+void tty_raw_mode_disable_atexit(void);
+
+int tty_raw_mode_disable(int fd) {
+    if (!rawmode_is_set)
+        return 0;
+
+    int err = tcsetattr(fd, TCSAFLUSH, &orig_termios);
+    if (err < 0)
+        return err;
+    rawmode_is_set = false;
+    return 0;
+}
+
+int tty_raw_mode_enable(int fd) {
 
     struct termios raw;
-
-    // If enable is zero, we just have to disable raw mode if it is
-    // currently set.
-    if (enable == 0) {
-        // Don't even check the return value as it's too late.
-        if (rawmode_is_set && tcsetattr(fd, TCSAFLUSH, &orig_termios) != -1)
-            rawmode_is_set = false;
-        return 0;
-    }
 
     // Enable raw mode.
     if (!isatty(fd))
         goto fatal;
     if (!rawmode_atexit_is_registered) {
-        atexit(tty_disable_rawmode_atexit);
+        atexit(tty_raw_mode_disable_atexit);
         rawmode_atexit_is_registered = true;
     }
     if (tcgetattr(fd, &orig_termios) == -1)
@@ -147,7 +150,7 @@ fatal:
 }
 
 // At exit we'll try to fix the terminal to the initial conditions
-void tty_disable_rawmode_atexit(void) { tty_raw_mode(STDIN_FILENO, 0); }
+void tty_raw_mode_disable_atexit(void) { tty_raw_mode_disable(STDIN_FILENO); }
 
 void pty_clear_current_line(void) { write(STDOUT_FILENO, "\e[2K", 4); }
 
@@ -341,7 +344,7 @@ size_t message_fmt(const struct message *m, char *buf) {
 }
 
 int main(void) {
-    int err = tty_raw_mode(STDIN_FILENO, true);
+    int err = tty_raw_mode_enable(STDIN_FILENO);
     if (err < 0)
         exit(EXIT_FAILURE);
 
